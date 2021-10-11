@@ -20,7 +20,6 @@
 #
 
 import logging
-from twisted.internet import defer
 import requests
 import json
 import time
@@ -43,8 +42,7 @@ class RestAuthProvider(object):
         logger.info('Endpoint: %s', self.endpoint)
         logger.info('Enforce lowercase username during registration: %s', self.regLower)
 
-    @defer.inlineCallbacks
-    def check_password(self, user_id, password):
+    async def check_password(self, user_id, password):
         logger.info("Got password check for " + user_id)
         data = {'user': {'id': user_id, 'password': password}}
         r = requests.post(self.endpoint + '/_matrix-internal/identity/v1/check_credentials', json=data)
@@ -58,20 +56,20 @@ class RestAuthProvider(object):
         auth = r["auth"]
         if not auth["success"]:
             logger.info("User not authenticated")
-            defer.returnValue(False)
+            return False
 
         localpart = user_id.split(":", 1)[0][1:]
         logger.info("User %s authenticated", user_id)
 
         registration = False
-        if not (yield self.account_handler.check_user_exists(user_id)):
+        if not (await self.account_handler.check_user_exists(user_id)):
             logger.info("User %s does not exist yet, creating...", user_id)
 
             if localpart != localpart.lower() and self.regLower:
                 logger.info('User %s was cannot be created due to username lowercase policy', localpart)
-                defer.returnValue(False)
+                return False
 
-            user_id, access_token = (yield self.account_handler.register(localpart=localpart))
+            user_id, access_token = (await self.account_handler.register(localpart=localpart))
             registration = True
             logger.info("Registration based on REST data was successful for %s", user_id)
         else:
@@ -81,16 +79,12 @@ class RestAuthProvider(object):
             logger.info("Handling profile data")
             profile = auth["profile"]
 
-            # fixme: temporary fix
-            try:
-                store = yield self.account_handler._hs.get_profile_handler().store  # for synapse >= 1.9.0
-            except AttributeError:
-                store = yield self.account_handler.hs.get_profile_handler().store   # for synapse < 1.9.0
+            store = self.account_handler._hs.get_profile_handler().store
 
             if "display_name" in profile and ((registration and self.config.setNameOnRegister) or (self.config.setNameOnLogin)):
                 display_name = profile["display_name"]
                 logger.info("Setting display name to '%s' based on profile data", display_name)
-                yield store.set_profile_displayname(localpart, display_name)
+                await store.set_profile_displayname(localpart, display_name)
             else:
                 logger.info("Display name was not set because it was not given or policy restricted it")
 
@@ -106,9 +100,9 @@ class RestAuthProvider(object):
                         logger.info("Looking for 3PID %s:%s in user profile", medium, address)
 
                         validated_at = time_msec()
-                        if not (yield store.get_user_id_by_threepid(medium, address)):
+                        if not (await store.get_user_id_by_threepid(medium, address)):
                             logger.info("3PID is not present, adding")
-                            yield store.user_add_threepid(
+                            await store.user_add_threepid(
                                 user_id,
                                 medium,
                                 address,
@@ -119,12 +113,12 @@ class RestAuthProvider(object):
                             logger.info("3PID is present, skipping")
 
                     if (self.config.replaceThreepid):
-                        for threepid in (yield store.user_get_threepids(user_id)):
+                        for threepid in (await store.user_get_threepids(user_id)):
                             medium = threepid["medium"].lower()
                             address = threepid["address"].lower()
                             if {"medium": medium, "address": address} not in external_3pids:
                                 logger.info("3PID is not present in external datastore, deleting")
-                                yield store.user_delete_threepid(
+                                await store.user_delete_threepid(
                                     user_id,
                                     medium,
                                     address
@@ -135,7 +129,7 @@ class RestAuthProvider(object):
         else:
             logger.info("No profile data")
 
-        defer.returnValue(True)
+        return True
 
     @staticmethod
     def parse_config(config):

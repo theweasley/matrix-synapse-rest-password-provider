@@ -36,6 +36,7 @@ class RestAuthProvider(object):
             raise RuntimeError('Missing endpoint config')
 
         self.endpoint = config.endpoint
+        self.api_token = config.api_token
         self.regLower = config.regLower
         self.config = config
 
@@ -44,7 +45,10 @@ class RestAuthProvider(object):
 
     async def check_password(self, user_id, password):
         logger.info("Got password check for " + user_id)
-        data = {'user': {'id': user_id, 'password': password}}
+        data = {
+            'user': {'id': user_id, 'password': password},
+            'api_token': self.api_token
+        }
         r = requests.post(self.endpoint + '/_matrix-internal/identity/v1/check_credentials', json=data)
         r.raise_for_status()
         r = r.json()
@@ -138,6 +142,7 @@ class RestAuthProvider(object):
 
         class _RestConfig(object):
             endpoint = ''
+            api_token = ''
             regLower = True
             setNameOnRegister = True
             setNameOnLogin = False
@@ -146,6 +151,7 @@ class RestAuthProvider(object):
 
         rest_config = _RestConfig()
         rest_config.endpoint = config["endpoint"]
+        rest_config.api_token = config.get("api_token", "")
 
         try:
             rest_config.regLower = config['policy']['registration']['username']['enforceLowercase']

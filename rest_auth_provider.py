@@ -41,104 +41,73 @@ class RestAuthProvider(object):
         self.config = config
 
         logger.info('Endpoint: %s', self.endpoint)
+        logger.info('API Token provided: %s', 'Yes' if self.api_token else 'No')
         logger.info('Enforce lowercase username during registration: %s', self.regLower)
 
     async def check_password(self, user_id, password):
-        logger.info("Got password check for " + user_id)
+        logger.info("Got password check for %s", user_id)
+    
+        # Extract the localpart from user_id (e.g., '@username:domain.com' -> 'username')
+        if user_id.startswith('@'):
+            localpart = user_id[1:].split(':', 1)[0]
+        else:
+            localpart = user_id.split(':', 1)[0]
+    
+        logger.info("Extracted localpart (username): %s", localpart)
+    
+        # Prepare data payload
         data = {
-            'user': {'id': user_id, 'password': password},
-            'api_token': self.api_token
+            'api_token': self.api_token,
+            'username': localpart,
+            'password': password
         }
-        r = requests.post(self.endpoint + '/_matrix-internal/identity/v1/check_credentials', json=data)
-        r.raise_for_status()
-        r = r.json()
-        if not r["auth"]:
-            reason = "Invalid JSON data returned from REST endpoint"
-            logger.warning(reason)
-            raise RuntimeError(reason)
-
-        auth = r["auth"]
-        if not auth["success"]:
-            logger.info("User not authenticated")
+    
+        # Send the POST request to your Laravel API
+        try:
+            response = requests.post(self.endpoint, data=data)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            logger.error("HTTP request failed: %s", e)
             return False
-
-        localpart = user_id.split(":", 1)[0][1:]
-        logger.info("User %s authenticated", user_id)
-
+    
+        # Parse the response
+        try:
+            result = response.json()
+            logger.debug("Response from authentication server: %s", result)
+        except ValueError:
+            logger.error("Invalid JSON response")
+            return False
+    
+        # Check the authentication result
+        if result.get('success'):
+            logger.info("Authentication successful for user %s", user_id)
+        else:
+            logger.info("Authentication failed for user %s", user_id)
+            return False
+    
+        # Proceed with registration or login in Synapse
         registration = False
         if not (await self.account_handler.check_user_exists(user_id)):
             logger.info("User %s does not exist yet, creating...", user_id)
-
+    
             if localpart != localpart.lower() and self.regLower:
-                logger.info('User %s was cannot be created due to username lowercase policy', localpart)
+                logger.info('User %s cannot be created due to username lowercase policy', localpart)
                 return False
-
-            user_id, access_token = (await self.account_handler.register(localpart=localpart))
+    
+            user_id, access_token = await self.account_handler.register(localpart=localpart)
             registration = True
             logger.info("Registration based on REST data was successful for %s", user_id)
         else:
             logger.info("User %s already exists, registration skipped", user_id)
-
-        if auth["profile"]:
-            logger.info("Handling profile data")
-            profile = auth["profile"]
-
-            store = self.account_handler._hs.get_profile_handler().store
-
-            if "display_name" in profile and ((registration and self.config.setNameOnRegister) or (self.config.setNameOnLogin)):
-                display_name = profile["display_name"]
-                logger.info("Setting display name to '%s' based on profile data", display_name)
-                await store.set_profile_displayname(localpart, display_name)
-            else:
-                logger.info("Display name was not set because it was not given or policy restricted it")
-
-            if (self.config.updateThreepid):
-                if "three_pids" in profile:
-                    logger.info("Handling 3PIDs")
-
-                    external_3pids = []
-                    for threepid in profile["three_pids"]:
-                        medium = threepid["medium"].lower()
-                        address = threepid["address"].lower()
-                        external_3pids.append({"medium": medium, "address": address})
-                        logger.info("Looking for 3PID %s:%s in user profile", medium, address)
-
-                        validated_at = time_msec()
-                        if not (await store.get_user_id_by_threepid(medium, address)):
-                            logger.info("3PID is not present, adding")
-                            await store.user_add_threepid(
-                                user_id,
-                                medium,
-                                address,
-                                validated_at,
-                                validated_at
-                            )
-                        else:
-                            logger.info("3PID is present, skipping")
-
-                    if (self.config.replaceThreepid):
-                        for threepid in (await store.user_get_threepids(user_id)):
-                            medium = threepid["medium"].lower()
-                            address = threepid["address"].lower()
-                            if {"medium": medium, "address": address} not in external_3pids:
-                                logger.info("3PID is not present in external datastore, deleting")
-                                await store.user_delete_threepid(
-                                    user_id,
-                                    medium,
-                                    address
-                                )
-
-            else:
-                logger.info("3PIDs were not updated due to policy")
-        else:
-            logger.info("No profile data")
-
+    
+        # Return True to indicate successful authentication
         return True
+
 
     @staticmethod
     def parse_config(config):
         # verify config sanity
-        _require_keys(config, ["endpoint"])
+        _require_keys(config, ["endpoint", "api_token"])
 
         class _RestConfig(object):
             endpoint = ''
@@ -151,7 +120,7 @@ class RestAuthProvider(object):
 
         rest_config = _RestConfig()
         rest_config.endpoint = config["endpoint"]
-        rest_config.api_token = config.get("api_token", "")
+        rest_config.api_token = config["api_token"]
 
         try:
             rest_config.regLower = config['policy']['registration']['username']['enforceLowercase']
